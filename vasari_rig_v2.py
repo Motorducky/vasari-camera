@@ -29,10 +29,15 @@ OBVIOUS 3D:
   + = Slices
 
 CONTROLS:
+  SPACE = Toggle puppet mode (continuous corruption) - mode 7/B
   N/M = Zoom out/in
-  ↑↓ or [/] = Line weight (mode 2)
-  ←→ or ,/. = Blend original (mode 7/B)
   Q = Quit
+
+VASARI TUNING (mode 7/B only):
+  ; ' = Intensity down/up (how hard it hits)
+  o p = Speed down/up (how fast waves come)
+  < > = Face pop down/up (Shift + , .)
+  , . = Blend with original down/up
 """
 
 import cv2
@@ -54,6 +59,11 @@ lag_intensity = 0.95  # For depth lag effect (0.5 = mild, 0.99 = extreme ghostin
 _lag_buffer = None  # For depth lag effect
 vasari_force_corrupt = False  # SPACE triggers corruption
 puppet_mode = False  # Hold SPACE for continuous corruption
+
+# TUNING CONTROLS (adjustable with keys)
+corrupt_intensity = 1.0  # 0.3 = mild, 1.0 = normal, 2.0 = extreme ([ ] to adjust)
+corrupt_speed = 1.0      # 0.5 = slow waves, 1.0 = normal, 2.0 = fast (- = to adjust)
+face_pop_amount = 0.3    # How often face pops through (0 = never, 1 = always) (9 0 to adjust)
 
 # Separate wave state for each VASARI variant
 vasari_wave_start = -999
@@ -117,39 +127,51 @@ def effect_thermal_rgb(rgb, depth):
 
 
 def effect_vasari(rgb, depth):
-    """Mode 7 - inverted + AGGRESSIVE corruption + PUPPET MODE"""
+    """Mode 7 - inverted + AGGRESSIVE corruption + PUPPET MODE + FACE POP"""
     global vasari_wave_start, vasari_wave_length, vasari_wave_intensity, blend_amount, frame_count, vasari_force_corrupt, puppet_mode
+    global corrupt_intensity, corrupt_speed, face_pop_amount
 
     out = cv2.bitwise_not(rgb)
     h, w = out.shape[:2]
 
+    # Wave timing adjusted by speed
+    wave_min = max(10, int(15 / corrupt_speed))
+    wave_max = max(20, int(40 / corrupt_speed))
+    cooldown_min = max(10, int(20 / corrupt_speed))
+    cooldown_max = max(30, int(60 / corrupt_speed))
+
     # PUPPET MODE: continuous corruption while SPACE held
     if puppet_mode:
-        # Keep wave going - restart if it ended
         if frame_count - vasari_wave_start >= vasari_wave_length:
             vasari_wave_start = frame_count
-            vasari_wave_length = random.randint(15, 40)  # Short punchy waves
+            vasari_wave_length = random.randint(wave_min, wave_max)
             vasari_wave_intensity = 1.0
-    # Check for force trigger (SPACE tap) or random trigger
     elif 'vasari_force_corrupt' in globals() and vasari_force_corrupt:
         globals()['vasari_force_corrupt'] = False
         vasari_wave_start = frame_count
-        vasari_wave_length = random.randint(30, 90)
+        vasari_wave_length = random.randint(wave_max, wave_max * 3)
         vasari_wave_intensity = 1.0
-    elif frame_count - vasari_wave_start > vasari_wave_length + random.randint(20, 60) and random.random() > 0.95:
+    elif frame_count - vasari_wave_start > vasari_wave_length + random.randint(cooldown_min, cooldown_max) and random.random() > 0.95:
         vasari_wave_start = frame_count
-        vasari_wave_length = random.randint(30, 90)
+        vasari_wave_length = random.randint(wave_max, wave_max * 3)
         vasari_wave_intensity = random.uniform(0.7, 1.0)
 
     wave_progress = frame_count - vasari_wave_start
     in_wave = wave_progress < vasari_wave_length or puppet_mode
     if in_wave:
-        # Simple triangle wave - instant on, linear decay
-        intensity = max(0, 1.0 - (wave_progress / vasari_wave_length)) * vasari_wave_intensity
+        # Intensity with tuning
+        base_intensity = max(0, 1.0 - (wave_progress / max(1, vasari_wave_length))) * vasari_wave_intensity
+        intensity = base_intensity * corrupt_intensity
 
-        # === HORIZONTAL BAND SHIFTS (the main glitch effect) ===
-        num_bands = random.randint(8, 25)
-        for _ in range(num_bands):
+        # === FACE POP: occasionally let real face through ===
+        if face_pop_amount > 0 and random.random() < face_pop_amount * 0.3:
+            # Flash of real face - blend original RGB into corrupted output
+            pop_strength = random.uniform(0.3, 0.8)
+            out = cv2.addWeighted(out, 1 - pop_strength, rgb, pop_strength, 0)
+
+        # === HORIZONTAL BAND SHIFTS ===
+        num_bands = random.randint(int(8 * corrupt_intensity), int(25 * corrupt_intensity) + 1)
+        for _ in range(max(1, num_bands)):
             y = random.randint(0, max(0, h - 2))
             band_h = random.randint(2, max(3, int(50 * intensity) + 2))
             band_h = min(band_h, h - y)
@@ -158,9 +180,9 @@ def effect_vasari(rgb, depth):
                 shift = random.randint(-max_shift, max_shift)
                 out[y:y + band_h, :] = np.roll(out[y:y + band_h, :], shift, axis=1)
 
-        # === BLOCK DISPLACEMENT (chunks move around) ===
-        if intensity > 0.3 and h > 60 and w > 100:
-            for _ in range(random.randint(2, 6)):
+        # === BLOCK DISPLACEMENT ===
+        if intensity > 0.3 / corrupt_intensity and h > 60 and w > 100:
+            for _ in range(random.randint(2, int(6 * corrupt_intensity) + 1)):
                 bh = random.randint(20, min(60, h - 1))
                 bw = random.randint(30, min(100, w - 1))
                 by = random.randint(0, max(0, h - bh - 1))
@@ -172,7 +194,7 @@ def effect_vasari(rgb, depth):
                     out[ny:ny+bh, nx:nx+bw] = block
 
         # === CHANNEL CORRUPTION ===
-        if intensity > 0.2 and random.random() > 0.4:
+        if intensity > 0.2 / corrupt_intensity and random.random() > 0.4:
             choice = random.randint(0, 3)
             if choice == 0:
                 out = np.ascontiguousarray(out[:, :, [2, 1, 0]])
@@ -184,15 +206,15 @@ def effect_vasari(rgb, depth):
                 ch = random.randint(0, 2)
                 out[:, :, ch] = np.roll(out[:, :, ch], random.randint(-20, 20), axis=1)
 
-        # === PIXELATION BURSTS ===
-        if intensity > 0.4 and random.random() > 0.5:
-            block = random.randint(4, 16)
+        # === PIXELATION BURSTS (this is what shows your face through!) ===
+        if intensity > 0.4 / corrupt_intensity and random.random() > 0.5:
+            block = random.randint(max(2, int(4 / corrupt_intensity)), int(16 * corrupt_intensity))
             if w // block > 0 and h // block > 0:
                 small = cv2.resize(out, (w // block, h // block), interpolation=cv2.INTER_LINEAR)
                 out = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
 
-        # === HORIZONTAL LINE DUPLICATION (VHS tracking effect) ===
-        if intensity > 0.5 and random.random() > 0.6 and h > 10:
+        # === VHS TRACKING ===
+        if intensity > 0.5 / corrupt_intensity and random.random() > 0.6 and h > 10:
             for _ in range(random.randint(3, 10)):
                 src_y = random.randint(0, max(0, h - 6))
                 dst_y = random.randint(0, max(0, h - 6))
@@ -200,6 +222,16 @@ def effect_vasari(rgb, depth):
                 num_lines = min(num_lines, h - src_y, h - dst_y)
                 if num_lines > 0:
                     out[dst_y:dst_y + num_lines, :] = out[src_y:src_y + num_lines, :]
+
+        # === FACE POP: bigger chunks of real face ===
+        if face_pop_amount > 0.2 and random.random() < face_pop_amount * 0.15 and h > 100 and w > 100:
+            # Show a rectangle of real face
+            fy = random.randint(0, h - 80)
+            fx = random.randint(0, w - 80)
+            fh = random.randint(40, 120)
+            fw = random.randint(40, 120)
+            fh, fw = min(fh, h - fy), min(fw, w - fx)
+            out[fy:fy+fh, fx:fx+fw] = rgb[fy:fy+fh, fx:fx+fw]
 
     # Blend with original if slider > 0
     if blend_amount > 0:
@@ -209,37 +241,49 @@ def effect_vasari(rgb, depth):
 
 
 def effect_vasari_breakup(rgb, depth):
-    """Mode B - AGGRESSIVE corruption on normal image (no invert) + PUPPET MODE"""
+    """Mode B - AGGRESSIVE corruption on normal image (no invert) + PUPPET MODE + TUNING"""
     global breakup_wave_start, breakup_wave_length, breakup_wave_intensity, blend_amount, frame_count, vasari_force_corrupt, puppet_mode
+    global corrupt_intensity, corrupt_speed, face_pop_amount
 
     out = rgb.copy()
     h, w = out.shape[:2]
 
-    # PUPPET MODE: continuous corruption while SPACE held
+    # Wave timing adjusted by speed
+    wave_min = max(10, int(15 / corrupt_speed))
+    wave_max = max(20, int(40 / corrupt_speed))
+    cooldown_min = max(10, int(20 / corrupt_speed))
+    cooldown_max = max(30, int(60 / corrupt_speed))
+
+    # PUPPET MODE: continuous corruption
     if puppet_mode:
         if frame_count - breakup_wave_start >= breakup_wave_length:
             breakup_wave_start = frame_count
-            breakup_wave_length = random.randint(15, 40)
+            breakup_wave_length = random.randint(wave_min, wave_max)
             breakup_wave_intensity = 1.0
     elif 'vasari_force_corrupt' in globals() and vasari_force_corrupt:
         globals()['vasari_force_corrupt'] = False
         breakup_wave_start = frame_count
-        breakup_wave_length = random.randint(30, 90)
+        breakup_wave_length = random.randint(wave_max, wave_max * 3)
         breakup_wave_intensity = 1.0
-    elif frame_count - breakup_wave_start > breakup_wave_length + random.randint(20, 60) and random.random() > 0.95:
+    elif frame_count - breakup_wave_start > breakup_wave_length + random.randint(cooldown_min, cooldown_max) and random.random() > 0.95:
         breakup_wave_start = frame_count
-        breakup_wave_length = random.randint(30, 90)
+        breakup_wave_length = random.randint(wave_max, wave_max * 3)
         breakup_wave_intensity = random.uniform(0.7, 1.0)
 
     wave_progress = frame_count - breakup_wave_start
     in_wave = wave_progress < breakup_wave_length or puppet_mode
     if in_wave:
-        # Simple triangle wave - instant on, linear decay
-        intensity = max(0, 1.0 - (wave_progress / breakup_wave_length)) * breakup_wave_intensity
+        base_intensity = max(0, 1.0 - (wave_progress / max(1, breakup_wave_length))) * breakup_wave_intensity
+        intensity = base_intensity * corrupt_intensity
+
+        # === FACE POP: occasionally let real face through clearly ===
+        if face_pop_amount > 0 and random.random() < face_pop_amount * 0.25:
+            # Breakup mode already shows face, so we do LESS corruption instead
+            intensity = intensity * 0.3  # Reduce corruption for this frame
 
         # === HORIZONTAL BAND SHIFTS ===
-        num_bands = random.randint(8, 25)
-        for _ in range(num_bands):
+        num_bands = random.randint(int(8 * corrupt_intensity), int(25 * corrupt_intensity) + 1)
+        for _ in range(max(1, num_bands)):
             y = random.randint(0, max(0, h - 2))
             band_h = random.randint(2, max(3, int(50 * intensity) + 2))
             band_h = min(band_h, h - y)
@@ -249,7 +293,7 @@ def effect_vasari_breakup(rgb, depth):
                 out[y:y + band_h, :] = np.roll(out[y:y + band_h, :], shift, axis=1)
 
         # === BLOCK DISPLACEMENT ===
-        if intensity > 0.3 and h > 60 and w > 100:
+        if intensity > 0.3 / corrupt_intensity and h > 60 and w > 100:
             for _ in range(random.randint(2, 6)):
                 bh = random.randint(20, min(60, h - 1))
                 bw = random.randint(30, min(100, w - 1))
@@ -938,6 +982,7 @@ effects = {
 
 def main():
     global line_weight, blend_amount, frame_count, zoom_level, lag_intensity, puppet_mode, vasari_wave_start, breakup_wave_start
+    global corrupt_intensity, corrupt_speed, face_pop_amount
 
     print(__doc__)
 
@@ -989,10 +1034,18 @@ def main():
                         depth = cv2.resize(depth, (W, H))
 
                 name, fx = effects.get(mode, ("Normal", effect_normal))
-                out = fx(rgb, depth)
+                try:
+                    out = fx(rgb, depth)
+                except Exception as e:
+                    print(f"Effect error: {e}")
+                    out = rgb.copy()
 
                 # ALWAYS make array contiguous and correct type for OpenCV
+                if out is None:
+                    out = rgb.copy()
                 out = np.ascontiguousarray(out, dtype=np.uint8)
+                if out.shape != rgb.shape:
+                    out = cv2.resize(out, (rgb.shape[1], rgb.shape[0]))
 
                 # HUD
                 info = f"{name}"
@@ -1002,9 +1055,8 @@ def main():
                     info += f" | Weight: {line_weight}"
                 if mode in [ord('7'), ord('b'), ord('B')]:
                     if puppet_mode:
-                        info += f" | PUPPET ON (SPACE=off)"
-                    else:
-                        info += f" | SPACE=puppet"
+                        info += f" | PUPPET"
+                    info += f" | I:{corrupt_intensity:.1f} S:{corrupt_speed:.1f} F:{face_pop_amount:.1f}"
                 if mode == ord('8'):
                     info += f" | Lag: {int(lag_intensity * 100)}% (,/.)"
 
@@ -1055,12 +1107,34 @@ def main():
                     if mode in [ord('7'), ord('b'), ord('B')]:
                         puppet_mode = not puppet_mode
                         if puppet_mode:
-                            # Start a wave immediately
                             vasari_wave_start = frame_count
                             breakup_wave_start = frame_count
-                            print("PUPPET ON - corrupting continuously!")
+                            print("PUPPET ON")
                         else:
                             print("PUPPET OFF")
+
+                # === TUNING CONTROLS (for mode 7/B only) ===
+                # ; ' = Intensity (how hard corruption hits)
+                elif k == ord(';') and mode in [ord('7'), ord('b'), ord('B')]:
+                    corrupt_intensity = max(0.2, corrupt_intensity - 0.2)
+                    print(f"Intensity: {corrupt_intensity:.1f}")
+                elif k == ord("'") and mode in [ord('7'), ord('b'), ord('B')]:
+                    corrupt_intensity = min(3.0, corrupt_intensity + 0.2)
+                    print(f"Intensity: {corrupt_intensity:.1f}")
+                # o p = Speed (how fast waves come)
+                elif k == ord('o') and mode in [ord('7'), ord('b'), ord('B')]:
+                    corrupt_speed = max(0.3, corrupt_speed - 0.2)
+                    print(f"Speed: {corrupt_speed:.1f}")
+                elif k == ord('p') and mode in [ord('7'), ord('b'), ord('B')]:
+                    corrupt_speed = min(3.0, corrupt_speed + 0.2)
+                    print(f"Speed: {corrupt_speed:.1f}")
+                # < > = Face pop amount (shift + , .)
+                elif k == ord('<') and mode in [ord('7'), ord('b'), ord('B')]:
+                    face_pop_amount = max(0.0, face_pop_amount - 0.1)
+                    print(f"Face pop: {face_pop_amount:.1f}")
+                elif k == ord('>') and mode in [ord('7'), ord('b'), ord('B')]:
+                    face_pop_amount = min(1.0, face_pop_amount + 0.1)
+                    print(f"Face pop: {face_pop_amount:.1f}")
 
     finally:
         pipeline.stop()
