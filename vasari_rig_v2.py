@@ -2,42 +2,37 @@
 """
 VASARI RIG V2 — Refined Effects
 
-RGB MODES:
-  1 = Normal RGB
+2D MODES:
+  1 = Normal
   2 = Edge ghost (↑↓ adjusts line weight)
   5 = Invert
-  6 = Thermal (RGB)
+  6 = Thermal
   7 = VASARI (invert + breathing corruption)
-  B = VASARI BREAKUP (no invert, just corruption on normal image)
+  B = VASARI BREAKUP (no invert, just corruption)
 
-3D DEPTH MODES:
-  9 = Point cloud (base)
-  W = Point cloud - SPARSE (bigger gaps)
-  E = Point cloud - DENSE (tight)
-  R = Point cloud - COLOR SHIFT (depth = hue)
-  T = Point cloud - STRIPES (horizontal only)
-  Y = Point cloud - RAIN (vertical streaks)
-  U = Point cloud - SCATTER (randomized positions)
+UNCANNY 3D (subtle/strange - uses depth):
+  3 = DepthFocus - mid-range sharp, near/far blurry (broken eyes)
+  4 = Atmosphere - far things desaturated and blue
+  8 = DepthLag - far things ghost/lag behind (CREEPY)
+  C = DepthGrain - film grain increases with distance
+  H = DepthPixel - resolution decreases with distance
+  I = DepthGlow - subtle warm glow on depth edges
+  J = Parallax - fake head tracking wobble
+  K = SelectiveReal - only one depth layer looks normal
+  L = DepthShadow - objects cast depth-based shadows
 
-  ] = Depth displacement (base)
-  A = Displacement - WAVE (sinusoidal warp)
-  S = Displacement - SHATTER (fragmented)
-  D = Displacement - RIPPLE (circular from center)
-  F = Displacement - STRETCH (vertical pull)
-  G = Displacement - TWIST (spiral distortion)
+OBVIOUS 3D:
+  9/W/E/R/T/Y/U = Point cloud variants
+  ]/A/S/D/F/G = Displacement variants
+  -/Z/X = Contour variants
+  0 = Portal
+  + = Slices
 
-  - = Depth contours (base)
-  Z = Contours - THICK (heavy lines, slow)
-  X = Contours - FILLED (solid bands)
-
-  + = Volumetric slices (keep as-is)
-  0 = Portal (FIXED - less flashy)
-
+CONTROLS:
+  N/M = Zoom out/in
+  ↑↓ or [/] = Line weight (mode 2)
+  ←→ or ,/. = Blend original (mode 7/B)
   Q = Quit
-
-ADJUSTMENTS:
-  ↑↓ = Line weight (mode 2)
-  ←→ = Blend original (mode 7/B)
 """
 
 import cv2
@@ -54,6 +49,11 @@ frame_count = 0
 line_weight = 1
 blend_amount = 0.0  # 0 = full effect, 1 = full original
 contour_phase = 0.0
+zoom_level = 1.0  # 1.0 = no zoom, 2.0 = 2x zoom, 3.0 = 3x zoom
+lag_intensity = 0.95  # For depth lag effect (0.5 = mild, 0.99 = extreme ghosting)
+_lag_buffer = None  # For depth lag effect
+vasari_force_corrupt = False  # SPACE triggers corruption
+puppet_mode = False  # Hold SPACE for continuous corruption
 
 # Separate wave state for each VASARI variant
 vasari_wave_start = -999
@@ -65,14 +65,18 @@ breakup_wave_length = 200
 breakup_wave_intensity = 0.7
 
 
-def crop_center(img):
-    """Crop to center 1/3 and resize back"""
+def crop_center(img, zoom=1.0):
+    """Crop to center and resize back. zoom=1.0 means no crop, zoom=3.0 means center 1/3"""
+    if zoom <= 1.0:
+        return img
     h, w = img.shape[:2]
     if h < 3 or w < 3:
         return img
-    y1, y2 = h // 3, 2 * h // 3
-    x1, x2 = w // 3, 2 * w // 3
-    cropped = img[y1:y2, x1:x2]
+    # Calculate crop region based on zoom
+    crop_h, crop_w = int(h / zoom), int(w / zoom)
+    y1 = (h - crop_h) // 2
+    x1 = (w - crop_w) // 2
+    cropped = img[y1:y1 + crop_h, x1:x1 + crop_w]
     if cropped.size == 0:
         return img
     return cv2.resize(cropped, (w, h))
@@ -113,37 +117,89 @@ def effect_thermal_rgb(rgb, depth):
 
 
 def effect_vasari(rgb, depth):
-    """Mode 7 - inverted + breathing corruption"""
-    global vasari_wave_start, vasari_wave_length, vasari_wave_intensity, blend_amount, frame_count
+    """Mode 7 - inverted + AGGRESSIVE corruption + PUPPET MODE"""
+    global vasari_wave_start, vasari_wave_length, vasari_wave_intensity, blend_amount, frame_count, vasari_force_corrupt, puppet_mode
 
     out = cv2.bitwise_not(rgb)
+    h, w = out.shape[:2]
 
-    # Random wave trigger
-    if frame_count - vasari_wave_start > vasari_wave_length + random.randint(120, 300) and random.random() > 0.997:
+    # PUPPET MODE: continuous corruption while SPACE held
+    if puppet_mode:
+        # Keep wave going - restart if it ended
+        if frame_count - vasari_wave_start >= vasari_wave_length:
+            vasari_wave_start = frame_count
+            vasari_wave_length = random.randint(15, 40)  # Short punchy waves
+            vasari_wave_intensity = 1.0
+    # Check for force trigger (SPACE tap) or random trigger
+    elif 'vasari_force_corrupt' in globals() and vasari_force_corrupt:
+        globals()['vasari_force_corrupt'] = False
         vasari_wave_start = frame_count
-        vasari_wave_length = random.randint(150, 400)
-        vasari_wave_intensity = random.uniform(0.5, 1.0)
+        vasari_wave_length = random.randint(30, 90)
+        vasari_wave_intensity = 1.0
+    elif frame_count - vasari_wave_start > vasari_wave_length + random.randint(20, 60) and random.random() > 0.95:
+        vasari_wave_start = frame_count
+        vasari_wave_length = random.randint(30, 90)
+        vasari_wave_intensity = random.uniform(0.7, 1.0)
 
     wave_progress = frame_count - vasari_wave_start
-    if wave_progress < vasari_wave_length:
-        breath = math.sin(math.pi * wave_progress / vasari_wave_length)
-        breath = breath * breath * breath
-        intensity = breath * vasari_wave_intensity
+    in_wave = wave_progress < vasari_wave_length or puppet_mode
+    if in_wave:
+        # Simple triangle wave - instant on, linear decay
+        intensity = max(0, 1.0 - (wave_progress / vasari_wave_length)) * vasari_wave_intensity
 
-        # Corruption effects
-        if intensity > 0.1:
-            num_bands = int(intensity * 8) + 1
-            for _ in range(num_bands):
-                y = random.randint(0, max(0, H - 50))
-                band_h = random.randint(10, int(40 * intensity) + 10)
-                band_h = min(band_h, H - y)  # Clamp to bounds
-                shift = int(random.uniform(-30, 30) * intensity)
-                out[y:y + band_h] = np.roll(out[y:y + band_h], shift, axis=1)
+        # === HORIZONTAL BAND SHIFTS (the main glitch effect) ===
+        num_bands = random.randint(8, 25)
+        for _ in range(num_bands):
+            y = random.randint(0, max(0, h - 2))
+            band_h = random.randint(2, max(3, int(50 * intensity) + 2))
+            band_h = min(band_h, h - y)
+            if band_h > 0:
+                max_shift = max(1, int(80 * intensity))
+                shift = random.randint(-max_shift, max_shift)
+                out[y:y + band_h, :] = np.roll(out[y:y + band_h, :], shift, axis=1)
 
-            if intensity > 0.4 and random.random() > 0.7:
-                # Fixed channel swap - pick one permutation and apply it
-                perm = random.choice([[2, 1, 0], [1, 0, 2], [0, 2, 1]])
-                out = out[:, :, perm]
+        # === BLOCK DISPLACEMENT (chunks move around) ===
+        if intensity > 0.3 and h > 60 and w > 100:
+            for _ in range(random.randint(2, 6)):
+                bh = random.randint(20, min(60, h - 1))
+                bw = random.randint(30, min(100, w - 1))
+                by = random.randint(0, max(0, h - bh - 1))
+                bx = random.randint(0, max(0, w - bw - 1))
+                if by + bh <= h and bx + bw <= w:
+                    block = out[by:by+bh, bx:bx+bw].copy()
+                    ny = max(0, min(h - bh, by + random.randint(-30, 30)))
+                    nx = max(0, min(w - bw, bx + random.randint(-50, 50)))
+                    out[ny:ny+bh, nx:nx+bw] = block
+
+        # === CHANNEL CORRUPTION ===
+        if intensity > 0.2 and random.random() > 0.4:
+            choice = random.randint(0, 3)
+            if choice == 0:
+                out = np.ascontiguousarray(out[:, :, [2, 1, 0]])
+            elif choice == 1:
+                out = np.ascontiguousarray(out[:, :, [1, 0, 2]])
+            elif choice == 2:
+                out = np.ascontiguousarray(out[:, :, [0, 2, 1]])
+            else:
+                ch = random.randint(0, 2)
+                out[:, :, ch] = np.roll(out[:, :, ch], random.randint(-20, 20), axis=1)
+
+        # === PIXELATION BURSTS ===
+        if intensity > 0.4 and random.random() > 0.5:
+            block = random.randint(4, 16)
+            if w // block > 0 and h // block > 0:
+                small = cv2.resize(out, (w // block, h // block), interpolation=cv2.INTER_LINEAR)
+                out = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        # === HORIZONTAL LINE DUPLICATION (VHS tracking effect) ===
+        if intensity > 0.5 and random.random() > 0.6 and h > 10:
+            for _ in range(random.randint(3, 10)):
+                src_y = random.randint(0, max(0, h - 6))
+                dst_y = random.randint(0, max(0, h - 6))
+                num_lines = random.randint(1, 5)
+                num_lines = min(num_lines, h - src_y, h - dst_y)
+                if num_lines > 0:
+                    out[dst_y:dst_y + num_lines, :] = out[src_y:src_y + num_lines, :]
 
     # Blend with original if slider > 0
     if blend_amount > 0:
@@ -153,40 +209,80 @@ def effect_vasari(rgb, depth):
 
 
 def effect_vasari_breakup(rgb, depth):
-    """Mode B - corruption WITHOUT invert (normal image breaks up)"""
-    global breakup_wave_start, breakup_wave_length, breakup_wave_intensity, blend_amount, frame_count
+    """Mode B - AGGRESSIVE corruption on normal image (no invert) + PUPPET MODE"""
+    global breakup_wave_start, breakup_wave_length, breakup_wave_intensity, blend_amount, frame_count, vasari_force_corrupt, puppet_mode
 
-    out = rgb.copy()  # Start with normal, not inverted
+    out = rgb.copy()
+    h, w = out.shape[:2]
 
-    # Random wave trigger
-    if frame_count - breakup_wave_start > breakup_wave_length + random.randint(120, 300) and random.random() > 0.997:
+    # PUPPET MODE: continuous corruption while SPACE held
+    if puppet_mode:
+        if frame_count - breakup_wave_start >= breakup_wave_length:
+            breakup_wave_start = frame_count
+            breakup_wave_length = random.randint(15, 40)
+            breakup_wave_intensity = 1.0
+    elif 'vasari_force_corrupt' in globals() and vasari_force_corrupt:
+        globals()['vasari_force_corrupt'] = False
         breakup_wave_start = frame_count
-        breakup_wave_length = random.randint(150, 400)
-        breakup_wave_intensity = random.uniform(0.5, 1.0)
+        breakup_wave_length = random.randint(30, 90)
+        breakup_wave_intensity = 1.0
+    elif frame_count - breakup_wave_start > breakup_wave_length + random.randint(20, 60) and random.random() > 0.95:
+        breakup_wave_start = frame_count
+        breakup_wave_length = random.randint(30, 90)
+        breakup_wave_intensity = random.uniform(0.7, 1.0)
 
     wave_progress = frame_count - breakup_wave_start
-    if wave_progress < breakup_wave_length:
-        breath = math.sin(math.pi * wave_progress / breakup_wave_length)
-        breath = breath * breath * breath
-        intensity = breath * breakup_wave_intensity
+    in_wave = wave_progress < breakup_wave_length or puppet_mode
+    if in_wave:
+        # Simple triangle wave - instant on, linear decay
+        intensity = max(0, 1.0 - (wave_progress / breakup_wave_length)) * breakup_wave_intensity
 
-        if intensity > 0.1:
-            num_bands = int(intensity * 8) + 1
-            for _ in range(num_bands):
-                y = random.randint(0, max(0, H - 50))
-                band_h = random.randint(10, int(40 * intensity) + 10)
-                band_h = min(band_h, H - y)  # Clamp to bounds
-                shift = int(random.uniform(-30, 30) * intensity)
-                out[y:y + band_h] = np.roll(out[y:y + band_h], shift, axis=1)
+        # === HORIZONTAL BAND SHIFTS ===
+        num_bands = random.randint(8, 25)
+        for _ in range(num_bands):
+            y = random.randint(0, max(0, h - 2))
+            band_h = random.randint(2, max(3, int(50 * intensity) + 2))
+            band_h = min(band_h, h - y)
+            if band_h > 0:
+                max_shift = max(1, int(80 * intensity))
+                shift = random.randint(-max_shift, max_shift)
+                out[y:y + band_h, :] = np.roll(out[y:y + band_h, :], shift, axis=1)
 
-            # Subtle color shifts instead of full channel swap
-            if intensity > 0.4 and random.random() > 0.7:
-                # Slight hue rotation - use int16 to avoid overflow
-                hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV)
-                hsv_h = hsv[:, :, 0].astype(np.int16)
-                hsv_h = (hsv_h + int(intensity * 30)) % 180
-                hsv[:, :, 0] = hsv_h.astype(np.uint8)
-                out = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        # === BLOCK DISPLACEMENT ===
+        if intensity > 0.3 and h > 60 and w > 100:
+            for _ in range(random.randint(2, 6)):
+                bh = random.randint(20, min(60, h - 1))
+                bw = random.randint(30, min(100, w - 1))
+                by = random.randint(0, max(0, h - bh - 1))
+                bx = random.randint(0, max(0, w - bw - 1))
+                if by + bh <= h and bx + bw <= w:
+                    block = out[by:by+bh, bx:bx+bw].copy()
+                    ny = max(0, min(h - bh, by + random.randint(-30, 30)))
+                    nx = max(0, min(w - bw, bx + random.randint(-50, 50)))
+                    out[ny:ny+bh, nx:nx+bw] = block
+
+        # === COLOR GLITCHING (hue shift for breakup mode) ===
+        if intensity > 0.2 and random.random() > 0.4:
+            hsv = cv2.cvtColor(out, cv2.COLOR_BGR2HSV)
+            hsv[:, :, 0] = ((hsv[:, :, 0].astype(np.int16) + random.randint(20, 80)) % 180).astype(np.uint8)
+            out = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+        # === PIXELATION BURSTS ===
+        if intensity > 0.4 and random.random() > 0.5:
+            block = random.randint(4, 16)
+            if w // block > 0 and h // block > 0:
+                small = cv2.resize(out, (w // block, h // block), interpolation=cv2.INTER_LINEAR)
+                out = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+
+        # === HORIZONTAL LINE DUPLICATION ===
+        if intensity > 0.5 and random.random() > 0.6 and h > 10:
+            for _ in range(random.randint(3, 10)):
+                src_y = random.randint(0, max(0, h - 6))
+                dst_y = random.randint(0, max(0, h - 6))
+                num_lines = random.randint(1, 5)
+                num_lines = min(num_lines, h - src_y, h - dst_y)
+                if num_lines > 0:
+                    out[dst_y:dst_y + num_lines, :] = out[src_y:src_y + num_lines, :]
 
     if blend_amount > 0:
         out = cv2.addWeighted(out, 1 - blend_amount, rgb, blend_amount, 0)
@@ -518,6 +614,211 @@ def effect_contours_filled(rgb, depth):
     return colored
 
 
+# === UNCANNY/SUBTLE 3D EFFECTS ===
+
+def effect_depth_focus(rgb, depth):
+    """3 - Depth-based focus: mid-range sharp, near/far blurry (like broken eyes)"""
+    if depth is None:
+        return rgb
+    d = cv2.normalize(depth, None, 0, 1, cv2.NORM_MINMAX).astype(np.float32)
+
+    # Blur the image
+    blurred = cv2.GaussianBlur(rgb, (21, 21), 0)
+
+    # Focus on mid-range (0.3-0.6 depth)
+    # Calculate "focus" amount - 1.0 at sweet spot, 0.0 at extremes
+    focus = 1.0 - np.abs(d - 0.45) * 2.5
+    focus = np.clip(focus, 0, 1)
+    focus_3ch = focus.reshape(H, W, 1)
+
+    # Blend sharp and blurry based on focus
+    out = (rgb.astype(np.float32) * focus_3ch + blurred.astype(np.float32) * (1 - focus_3ch)).astype(np.uint8)
+    return out
+
+
+def effect_depth_desaturate(rgb, depth):
+    """4 - Atmospheric perspective: far = desaturated and slightly blue"""
+    if depth is None:
+        return rgb
+    d = cv2.normalize(depth, None, 0, 1, cv2.NORM_MINMAX).astype(np.float32)
+
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_BGR2HSV).astype(np.float32)
+
+    # Reduce saturation based on depth (far = less saturated)
+    hsv[:, :, 1] = hsv[:, :, 1] * (1 - d * 0.7)
+
+    # Slight blue tint for distance
+    hsv[:, :, 0] = hsv[:, :, 0] * (1 - d * 0.3) + 100 * d * 0.3
+
+    hsv = np.clip(hsv, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+
+def effect_depth_lag(rgb, depth):
+    """8 - Temporal depth: far things ghost/lag behind (creepy)"""
+    global _lag_buffer, lag_intensity
+    if depth is None:
+        return rgb
+
+    # Initialize buffer if needed
+    if _lag_buffer is None or _lag_buffer.shape != rgb.shape:
+        globals()['_lag_buffer'] = rgb.copy().astype(np.float32)
+
+    d = cv2.normalize(depth, None, 0, 1, cv2.NORM_MINMAX).astype(np.float32)
+    d_3ch = d.reshape(H, W, 1)
+
+    # Update rate: close = fast, far = very slow (ghosty)
+    # lag_intensity controls how slow far things update
+    close_rate = 0.95  # Close things update fast
+    far_rate = 1.0 - lag_intensity  # Far things update slow (0.05 at max)
+    update_rate = close_rate - d_3ch * (close_rate - far_rate)
+
+    # Blend current frame into buffer based on depth
+    _lag_buffer = _lag_buffer * (1 - update_rate) + rgb.astype(np.float32) * update_rate
+
+    # Add slight color shift to lagged areas for visibility
+    out = _lag_buffer.copy()
+    lag_amount = (1 - update_rate) * d_3ch  # How much each pixel is lagging
+    # Slight blue/cool tint on ghosted areas
+    out[:, :, 0] = out[:, :, 0] + lag_amount[:, :, 0] * 20  # add blue
+    out[:, :, 2] = out[:, :, 2] - lag_amount[:, :, 0] * 10  # reduce red
+
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def effect_depth_grain(rgb, depth):
+    """C - Film grain that increases with distance (subtle wrongness)"""
+    if depth is None:
+        return rgb
+    d = cv2.normalize(depth, None, 0, 1, cv2.NORM_MINMAX).astype(np.float32)
+
+    # Generate noise
+    noise = np.random.normal(0, 30, rgb.shape).astype(np.float32)
+
+    # Apply noise based on depth (more grain = farther)
+    d_3ch = d.reshape(H, W, 1)
+    out = rgb.astype(np.float32) + noise * d_3ch * 0.7
+
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def effect_depth_pixelate(rgb, depth):
+    """H - Resolution decreases with distance"""
+    if depth is None:
+        return rgb
+    d = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    out = rgb.copy()
+
+    # Process in blocks, pixelation based on average depth
+    block = 8
+    for by in range(0, H, block):
+        for bx in range(0, W, block):
+            bh = min(block, H - by)
+            bw = min(block, W - bx)
+
+            avg_d = np.mean(d[by:by+bh, bx:bx+bw])
+
+            # Far = more pixelated
+            if avg_d > 80:
+                # Average the block colors
+                avg_color = np.mean(rgb[by:by+bh, bx:bx+bw], axis=(0, 1))
+                out[by:by+bh, bx:bx+bw] = avg_color
+
+    return out
+
+
+def effect_depth_glow(rgb, depth):
+    """I - Subtle glow on depth edges (things feel outlined by light)"""
+    if depth is None:
+        return rgb
+    d = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+    # Find depth edges
+    edges = cv2.Canny(d, 30, 80)
+
+    # Dilate for glow
+    kernel = np.ones((5, 5), np.uint8)
+    glow = cv2.dilate(edges, kernel, iterations=2)
+    glow_blur = cv2.GaussianBlur(glow, (15, 15), 0)
+
+    # Add subtle warm glow
+    glow_color = np.zeros_like(rgb, dtype=np.float32)
+    glow_color[:, :, 1] = glow_blur * 0.3  # slight green
+    glow_color[:, :, 2] = glow_blur * 0.5  # warm
+
+    out = rgb.astype(np.float32) + glow_color
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def effect_parallax(rgb, depth):
+    """J - Subtle parallax shift based on depth (fake head tracking)"""
+    global frame_count
+    if depth is None:
+        return rgb
+    d = cv2.normalize(depth, None, 0, 1, cv2.NORM_MINMAX).astype(np.float32)
+
+    # Subtle oscillating "head position"
+    head_x = math.sin(frame_count / 60) * 8
+
+    map_x = np.zeros((H, W), dtype=np.float32)
+    map_y = np.zeros((H, W), dtype=np.float32)
+
+    for y in range(H):
+        for x in range(W):
+            # Parallax: closer things shift more opposite to "head"
+            shift = head_x * (1 - d[y, x])
+            map_x[y, x] = x + shift
+            map_y[y, x] = y
+
+    return cv2.remap(rgb, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+
+def effect_selective_real(rgb, depth):
+    """K - Only one depth layer looks normal, rest is slightly off"""
+    if depth is None:
+        return rgb
+    d = cv2.normalize(depth, None, 0, 1, cv2.NORM_MINMAX).astype(np.float32)
+
+    # "Real" zone is mid-depth
+    real_zone = np.exp(-((d - 0.4) ** 2) / 0.05)  # Gaussian around 0.4
+    real_zone_3ch = real_zone.reshape(H, W, 1)
+
+    # Make non-real areas slightly wrong
+    weird = rgb.copy()
+    # Slight color shift
+    weird = cv2.cvtColor(weird, cv2.COLOR_BGR2HSV)
+    weird[:, :, 0] = (weird[:, :, 0].astype(np.int16) + 10) % 180
+    weird[:, :, 1] = np.clip(weird[:, :, 1].astype(np.int16) - 30, 0, 255).astype(np.uint8)
+    weird = cv2.cvtColor(weird, cv2.COLOR_HSV2BGR)
+    # Slight blur
+    weird = cv2.GaussianBlur(weird, (5, 5), 0)
+
+    out = (rgb.astype(np.float32) * real_zone_3ch + weird.astype(np.float32) * (1 - real_zone_3ch)).astype(np.uint8)
+    return out
+
+
+def effect_depth_shadow(rgb, depth):
+    """L - Objects cast depth-based shadows (sun from above)"""
+    if depth is None:
+        return rgb
+    d = cv2.normalize(depth, None, 0, 1, cv2.NORM_MINMAX).astype(np.float32)
+
+    # Shift depth map down to create shadow offset
+    shadow_offset = 15
+    shadow = np.roll(d, shadow_offset, axis=0)
+    shadow[:shadow_offset, :] = d[:shadow_offset, :]
+
+    # Shadow where shifted depth is closer than actual depth
+    shadow_mask = (shadow < d - 0.1).astype(np.float32)
+    shadow_mask = cv2.GaussianBlur(shadow_mask, (11, 11), 0)
+
+    # Darken shadowed areas
+    shadow_3ch = shadow_mask.reshape(H, W, 1)
+    out = rgb.astype(np.float32) * (1 - shadow_3ch * 0.5)
+
+    return out.astype(np.uint8)
+
+
 # === OTHER 3D EFFECTS ===
 
 def effect_portal_fixed(rgb, depth):
@@ -567,7 +868,7 @@ def effect_slices(rgb, depth):
 
 # === EFFECTS MAP (includes both lowercase and uppercase) ===
 effects = {
-    # RGB modes
+    # RGB modes (2D)
     ord('1'): ("Normal", effect_normal),
     ord('2'): ("Edge (↑↓=weight)", effect_edge),
     ord('5'): ("Invert", effect_invert),
@@ -575,6 +876,23 @@ effects = {
     ord('7'): ("VASARI", effect_vasari),
     ord('b'): ("Breakup (no invert)", effect_vasari_breakup),
     ord('B'): ("Breakup (no invert)", effect_vasari_breakup),
+
+    # UNCANNY 3D (subtle/strange depth effects)
+    ord('3'): ("DepthFocus (broken eyes)", effect_depth_focus),
+    ord('4'): ("Atmosphere (far=faded)", effect_depth_desaturate),
+    ord('8'): ("DepthLag (far=ghost)", effect_depth_lag),
+    ord('c'): ("DepthGrain (far=noisy)", effect_depth_grain),
+    ord('C'): ("DepthGrain (far=noisy)", effect_depth_grain),
+    ord('h'): ("DepthPixel (far=blocky)", effect_depth_pixelate),
+    ord('H'): ("DepthPixel (far=blocky)", effect_depth_pixelate),
+    ord('i'): ("DepthGlow (edge light)", effect_depth_glow),
+    ord('I'): ("DepthGlow (edge light)", effect_depth_glow),
+    ord('j'): ("Parallax (fake 3D)", effect_parallax),
+    ord('J'): ("Parallax (fake 3D)", effect_parallax),
+    ord('k'): ("SelectiveReal (one layer)", effect_selective_real),
+    ord('K'): ("SelectiveReal (one layer)", effect_selective_real),
+    ord('l'): ("DepthShadow (sun above)", effect_depth_shadow),
+    ord('L'): ("DepthShadow (sun above)", effect_depth_shadow),
 
     # Point cloud family (9)
     ord('9'): ("PointCloud", effect_pointcloud_base),
@@ -619,81 +937,76 @@ effects = {
 
 
 def main():
-    global line_weight, blend_amount, frame_count
+    global line_weight, blend_amount, frame_count, zoom_level, lag_intensity, puppet_mode, vasari_wave_start, breakup_wave_start
 
     print(__doc__)
 
+    # DepthAI v3 API
     pipeline = dai.Pipeline()
 
-    # RGB Camera - standard DepthAI API
-    cam_rgb = pipeline.create(dai.node.ColorCamera)
-    cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
-    cam_rgb.setPreviewSize(W, H)
-    cam_rgb.setInterleaved(False)
-    cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+    # RGB Camera (v3 API uses Camera node with .build())
+    cam = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
+    cam_out = cam.requestOutput((W, H), dai.ImgFrame.Type.BGR888p)
+    q_rgb = cam_out.createOutputQueue(maxSize=2, blocking=False)
 
-    xout_rgb = pipeline.create(dai.node.XLinkOut)
-    xout_rgb.setStreamName("rgb")
-    cam_rgb.preview.link(xout_rgb.input)
+    # Stereo cameras (v3 API)
+    left = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+    left_out = left.requestOutput((640, 480))
 
-    # Mono Cameras for Stereo
-    mono_left = pipeline.create(dai.node.MonoCamera)
-    mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
-    mono_left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
+    right = pipeline.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+    right_out = right.requestOutput((640, 480))
 
-    mono_right = pipeline.create(dai.node.MonoCamera)
-    mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
-    mono_right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_480_P)
-
-    # Stereo Depth
+    # Stereo depth
     stereo = pipeline.create(dai.node.StereoDepth)
-    stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_DENSITY)
-    stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
-    stereo.setOutputSize(W, H)
-
-    mono_left.out.link(stereo.left)
-    mono_right.out.link(stereo.right)
-
-    xout_depth = pipeline.create(dai.node.XLinkOut)
-    xout_depth.setStreamName("depth")
-    stereo.depth.link(xout_depth.input)
+    left_out.link(stereo.left)
+    right_out.link(stereo.right)
+    q_depth = stereo.depth.createOutputQueue(maxSize=2, blocking=False)
 
     mode = ord('7')  # Start in VASARI mode
     print("Starting in VASARI mode (7)")
 
-    with dai.Device(pipeline) as device:
-        q_rgb = device.getOutputQueue(name="rgb", maxSize=2, blocking=False)
-        q_depth = device.getOutputQueue(name="depth", maxSize=2, blocking=False)
+    pipeline.start()
 
+    try:
         with pyvirtualcam.Camera(width=W, height=H, fps=FPS) as vcam:
             print(f"Vcam: {vcam.device}")
 
-            while True:
+            while pipeline.isRunning():
                 frame_count += 1
 
                 rgb_msg = q_rgb.tryGet()
                 if rgb_msg is None:
                     continue
                 rgb = rgb_msg.getCvFrame()
-                rgb = crop_center(rgb)
+                rgb = crop_center(rgb, zoom_level)
 
                 depth = None
                 depth_msg = q_depth.tryGet()
                 if depth_msg is not None:
                     depth = depth_msg.getFrame()
-                    depth = crop_center(depth)
+                    depth = crop_center(depth, zoom_level)
                     if depth.shape[:2] != (H, W):
                         depth = cv2.resize(depth, (W, H))
 
                 name, fx = effects.get(mode, ("Normal", effect_normal))
                 out = fx(rgb, depth)
 
+                # ALWAYS make array contiguous and correct type for OpenCV
+                out = np.ascontiguousarray(out, dtype=np.uint8)
+
                 # HUD
                 info = f"{name}"
+                if zoom_level > 1.0:
+                    info += f" | Zoom: {zoom_level:.1f}x"
                 if mode == ord('2'):
                     info += f" | Weight: {line_weight}"
                 if mode in [ord('7'), ord('b'), ord('B')]:
-                    info += f" | Blend: {int(blend_amount * 100)}%"
+                    if puppet_mode:
+                        info += f" | PUPPET ON (SPACE=off)"
+                    else:
+                        info += f" | SPACE=puppet"
+                if mode == ord('8'):
+                    info += f" | Lag: {int(lag_intensity * 100)}% (,/.)"
 
                 cv2.putText(out, info, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
@@ -720,11 +1033,37 @@ def main():
                     if mode in [ord('7'), ord('b'), ord('B')]:
                         blend_amount = min(1.0, blend_amount + 0.1)
                         print(f"Blend: {int(blend_amount * 100)}%")
+                    elif mode == ord('8'):
+                        lag_intensity = min(0.99, lag_intensity + 0.05)
+                        print(f"Lag intensity: {int(lag_intensity * 100)}%")
                 elif k == 2 or k == 81 or k == ord(','):  # Left arrow (macOS=2, Linux=81) or ,
                     if mode in [ord('7'), ord('b'), ord('B')]:
                         blend_amount = max(0.0, blend_amount - 0.1)
                         print(f"Blend: {int(blend_amount * 100)}%")
+                    elif mode == ord('8'):
+                        lag_intensity = max(0.5, lag_intensity - 0.05)
+                        print(f"Lag intensity: {int(lag_intensity * 100)}%")
+                # Zoom controls: n = zoom out, m = zoom in
+                elif k == ord('n') or k == ord('N'):
+                    zoom_level = max(1.0, zoom_level - 0.5)
+                    print(f"Zoom: {zoom_level:.1f}x")
+                elif k == ord('m') or k == ord('M'):
+                    zoom_level = min(5.0, zoom_level + 0.5)
+                    print(f"Zoom: {zoom_level:.1f}x")
+                # SPACE = toggle PUPPET MODE in VASARI modes (continuous corruption)
+                elif k == ord(' '):
+                    if mode in [ord('7'), ord('b'), ord('B')]:
+                        puppet_mode = not puppet_mode
+                        if puppet_mode:
+                            # Start a wave immediately
+                            vasari_wave_start = frame_count
+                            breakup_wave_start = frame_count
+                            print("PUPPET ON - corrupting continuously!")
+                        else:
+                            print("PUPPET OFF")
 
+    finally:
+        pipeline.stop()
         cv2.destroyAllWindows()
 
 
