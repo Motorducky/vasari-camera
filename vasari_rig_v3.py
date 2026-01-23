@@ -37,7 +37,19 @@ OBVIOUS 3D:
 CONTROLS:
   SPACE = Toggle puppet mode (continuous corruption) - mode 7/B
   N/M = Zoom out/in
-  Q = Quit
+  Close window or Ctrl+C to quit
+
+VASARI + 3D COMBOS (home row):
+  D = Breakup + Ripple
+  F = Breakup + Stretch
+  G = Breakup + Twist
+  H = Breakup + DepthPixel
+  J = Breakup + Parallax
+  K = Breakup + SelectiveReal
+  L = Breakup + DepthShadow
+
+DEPTH INVERT:
+  V = Depth Invert (background inverted, face normal)
 
 VASARI TUNING (mode 7/B only):
   ; ' = Intensity down/up (how hard it hits)
@@ -982,6 +994,93 @@ def effect_slices(rgb, depth):
     return out
 
 
+# === DEPTH-SELECTIVE INVERT (V mode) ===
+
+def effect_depth_invert(rgb, depth):
+    """V - Background inverted, face/foreground normal (uses depth to separate)"""
+    if depth is None:
+        return rgb
+    h, w = rgb.shape[:2]
+    d = cv2.normalize(depth, None, 0, 1, cv2.NORM_MINMAX).astype(np.float32)
+    if d.shape[:2] != (h, w):
+        d = cv2.resize(d, (w, h))
+
+    # Invert the full image
+    inverted = cv2.bitwise_not(rgb)
+
+    # Create smooth mask: close (low depth) = normal, far (high depth) = inverted
+    # Depth ~0.3 and below is "foreground/face", above is "background"
+    # Smooth transition using sigmoid-like curve
+    threshold = 0.35
+    softness = 8.0  # Higher = sharper edge
+    mask = 1.0 / (1.0 + np.exp(-softness * (d - threshold)))
+    mask_3ch = mask.reshape(h, w, 1)
+
+    # Blend: mask=0 (close) -> rgb, mask=1 (far) -> inverted
+    out = rgb.astype(np.float32) * (1 - mask_3ch) + inverted.astype(np.float32) * mask_3ch
+    return out.astype(np.uint8)
+
+
+# === VASARI + 3D COMBO EFFECTS (home row keys) ===
+
+def effect_vasari_ripple(rgb, depth):
+    """D - Breakup + depth ripple overlay"""
+    # First apply breakup corruption
+    corrupted = effect_vasari_breakup(rgb, depth)
+    # Then apply ripple distortion
+    if depth is None:
+        return corrupted
+    return effect_displace_ripple(corrupted, depth)
+
+
+def effect_vasari_stretch(rgb, depth):
+    """F - Breakup + depth stretch overlay"""
+    corrupted = effect_vasari_breakup(rgb, depth)
+    if depth is None:
+        return corrupted
+    return effect_displace_stretch(corrupted, depth)
+
+
+def effect_vasari_twist(rgb, depth):
+    """G - Breakup + depth twist overlay"""
+    corrupted = effect_vasari_breakup(rgb, depth)
+    if depth is None:
+        return corrupted
+    return effect_displace_twist(corrupted, depth)
+
+
+def effect_vasari_pixelate(rgb, depth):
+    """H - Breakup + depth pixelate overlay"""
+    corrupted = effect_vasari_breakup(rgb, depth)
+    if depth is None:
+        return corrupted
+    return effect_depth_pixelate(corrupted, depth)
+
+
+def effect_vasari_parallax(rgb, depth):
+    """J - Breakup + parallax wobble overlay"""
+    corrupted = effect_vasari_breakup(rgb, depth)
+    if depth is None:
+        return corrupted
+    return effect_parallax(corrupted, depth)
+
+
+def effect_vasari_selective(rgb, depth):
+    """K - Breakup + selective real layer"""
+    corrupted = effect_vasari_breakup(rgb, depth)
+    if depth is None:
+        return corrupted
+    return effect_selective_real(corrupted, depth)
+
+
+def effect_vasari_shadow(rgb, depth):
+    """L - Breakup + depth shadow overlay"""
+    corrupted = effect_vasari_breakup(rgb, depth)
+    if depth is None:
+        return corrupted
+    return effect_depth_shadow(corrupted, depth)
+
+
 # === EFFECTS MAP (includes both lowercase and uppercase) ===
 effects = {
     # RGB modes (2D)
@@ -999,16 +1098,28 @@ effects = {
     ord('8'): ("DepthLag (far=ghost)", effect_depth_lag),
     ord('c'): ("DepthGrain (far=noisy)", effect_depth_grain),
     ord('C'): ("DepthGrain (far=noisy)", effect_depth_grain),
-    ord('h'): ("DepthPixel (far=blocky)", effect_depth_pixelate),
-    ord('H'): ("DepthPixel (far=blocky)", effect_depth_pixelate),
     ord('i'): ("DepthGlow (edge light)", effect_depth_glow),
     ord('I'): ("DepthGlow (edge light)", effect_depth_glow),
-    ord('j'): ("Parallax (fake 3D)", effect_parallax),
-    ord('J'): ("Parallax (fake 3D)", effect_parallax),
-    ord('k'): ("SelectiveReal (one layer)", effect_selective_real),
-    ord('K'): ("SelectiveReal (one layer)", effect_selective_real),
-    ord('l'): ("DepthShadow (sun above)", effect_depth_shadow),
-    ord('L'): ("DepthShadow (sun above)", effect_depth_shadow),
+
+    # Depth-selective invert
+    ord('v'): ("DepthInvert (bg inverted)", effect_depth_invert),
+    ord('V'): ("DepthInvert (bg inverted)", effect_depth_invert),
+
+    # VASARI + 3D COMBOS (home row)
+    ord('d'): ("VASARI+Ripple", effect_vasari_ripple),
+    ord('D'): ("VASARI+Ripple", effect_vasari_ripple),
+    ord('f'): ("VASARI+Stretch", effect_vasari_stretch),
+    ord('F'): ("VASARI+Stretch", effect_vasari_stretch),
+    ord('g'): ("VASARI+Twist", effect_vasari_twist),
+    ord('G'): ("VASARI+Twist", effect_vasari_twist),
+    ord('h'): ("VASARI+Pixel", effect_vasari_pixelate),
+    ord('H'): ("VASARI+Pixel", effect_vasari_pixelate),
+    ord('j'): ("VASARI+Parallax", effect_vasari_parallax),
+    ord('J'): ("VASARI+Parallax", effect_vasari_parallax),
+    ord('k'): ("VASARI+Selective", effect_vasari_selective),
+    ord('K'): ("VASARI+Selective", effect_vasari_selective),
+    ord('l'): ("VASARI+Shadow", effect_vasari_shadow),
+    ord('L'): ("VASARI+Shadow", effect_vasari_shadow),
 
     # Point cloud family (9)
     ord('9'): ("PointCloud", effect_pointcloud_base),
@@ -1025,18 +1136,13 @@ effects = {
     ord('u'): ("PC-Scatter", effect_pointcloud_scatter),
     ord('U'): ("PC-Scatter", effect_pointcloud_scatter),
 
-    # Displacement family (])
+    # Displacement family (]) - d/f/g now used for VASARI combos
     ord(']'): ("Displace", effect_displace_base),
     ord('a'): ("Disp-Wave", effect_displace_wave),
     ord('A'): ("Disp-Wave", effect_displace_wave),
     ord('s'): ("Disp-Shatter", effect_displace_shatter),
     ord('S'): ("Disp-Shatter", effect_displace_shatter),
-    ord('d'): ("Disp-Ripple", effect_displace_ripple),
-    ord('D'): ("Disp-Ripple", effect_displace_ripple),
-    ord('f'): ("Disp-Stretch", effect_displace_stretch),
-    ord('F'): ("Disp-Stretch", effect_displace_stretch),
-    ord('g'): ("Disp-Twist", effect_displace_twist),
-    ord('G'): ("Disp-Twist", effect_displace_twist),
+    # Pure displacement effects accessible via ] then arrow tuning or direct functions
 
     # Contour family (-)
     ord('-'): ("Contours", effect_contours_base),
@@ -1125,7 +1231,11 @@ def main():
                     info += f" | Zoom: {zoom_level:.1f}x"
                 if mode == ord('2'):
                     info += f" | Weight: {line_weight}"
-                if mode in [ord('7'), ord('b'), ord('B')]:
+                # All VASARI-based modes (including combos)
+                vasari_modes = [ord('7'), ord('b'), ord('B'), ord('d'), ord('D'), ord('f'), ord('F'),
+                                ord('g'), ord('G'), ord('h'), ord('H'), ord('j'), ord('J'),
+                                ord('k'), ord('K'), ord('l'), ord('L')]
+                if mode in vasari_modes:
                     if puppet_mode:
                         info += f" | PUPPET"
                     info += f" | I:{corrupt_intensity:.1f} S:{corrupt_speed:.1f} F:{face_pop_amount:.1f}"
@@ -1138,9 +1248,8 @@ def main():
                 cv2.imshow("Vasari V3", out)
 
                 k = cv2.waitKey(1) & 0xFF
-                if k == ord('q') or k == ord('Q'):
-                    break
-                elif k in effects:
+                # Removed Q to quit - just close window or Ctrl+C
+                if k in effects:
                     # Clear lag buffer when leaving DepthLag mode
                     if mode == ord('8') and k != ord('8'):
                         globals()['_lag_buffer'] = None
@@ -1157,14 +1266,14 @@ def main():
                         line_weight = max(1, line_weight - 1)
                         print(f"Line weight: {line_weight}")
                 elif k == 3 or k == 83 or k == ord('.'):  # Right arrow (macOS=3, Linux=83) or .
-                    if mode in [ord('7'), ord('b'), ord('B')]:
+                    if mode in vasari_modes:
                         blend_amount = min(1.0, blend_amount + 0.1)
                         print(f"Blend: {int(blend_amount * 100)}%")
                     elif mode == ord('8'):
                         lag_intensity = min(0.99, lag_intensity + 0.05)
                         print(f"Lag intensity: {int(lag_intensity * 100)}%")
                 elif k == 2 or k == 81 or k == ord(','):  # Left arrow (macOS=2, Linux=81) or ,
-                    if mode in [ord('7'), ord('b'), ord('B')]:
+                    if mode in vasari_modes:
                         blend_amount = max(0.0, blend_amount - 0.1)
                         print(f"Blend: {int(blend_amount * 100)}%")
                     elif mode == ord('8'):
@@ -1179,7 +1288,7 @@ def main():
                     print(f"Zoom: {zoom_level:.1f}x")
                 # SPACE = toggle PUPPET MODE in VASARI modes (continuous corruption)
                 elif k == ord(' '):
-                    if mode in [ord('7'), ord('b'), ord('B')]:
+                    if mode in vasari_modes:
                         puppet_mode = not puppet_mode
                         if puppet_mode:
                             vasari_wave_start = frame_count
@@ -1188,26 +1297,26 @@ def main():
                         else:
                             print("PUPPET OFF")
 
-                # === TUNING CONTROLS (for mode 7/B only) ===
+                # === TUNING CONTROLS (for all VASARI modes including combos) ===
                 # ; ' = Intensity (how hard corruption hits)
-                elif k == ord(';') and mode in [ord('7'), ord('b'), ord('B')]:
+                elif k == ord(';') and mode in vasari_modes:
                     corrupt_intensity = max(0.2, corrupt_intensity - 0.2)
                     print(f"Intensity: {corrupt_intensity:.1f}")
-                elif k == ord("'") and mode in [ord('7'), ord('b'), ord('B')]:
+                elif k == ord("'") and mode in vasari_modes:
                     corrupt_intensity = min(3.0, corrupt_intensity + 0.2)
                     print(f"Intensity: {corrupt_intensity:.1f}")
                 # o p = Speed (how fast waves come)
-                elif k == ord('o') and mode in [ord('7'), ord('b'), ord('B')]:
+                elif k == ord('o') and mode in vasari_modes:
                     corrupt_speed = max(0.3, corrupt_speed - 0.2)
                     print(f"Speed: {corrupt_speed:.1f}")
-                elif k == ord('p') and mode in [ord('7'), ord('b'), ord('B')]:
+                elif k == ord('p') and mode in vasari_modes:
                     corrupt_speed = min(3.0, corrupt_speed + 0.2)
                     print(f"Speed: {corrupt_speed:.1f}")
                 # < > = Face pop amount (shift + , .)
-                elif k == ord('<') and mode in [ord('7'), ord('b'), ord('B')]:
+                elif k == ord('<') and mode in vasari_modes:
                     face_pop_amount = max(0.0, face_pop_amount - 0.1)
                     print(f"Face pop: {face_pop_amount:.1f}")
-                elif k == ord('>') and mode in [ord('7'), ord('b'), ord('B')]:
+                elif k == ord('>') and mode in vasari_modes:
                     face_pop_amount = min(1.0, face_pop_amount + 0.1)
                     print(f"Face pop: {face_pop_amount:.1f}")
 
