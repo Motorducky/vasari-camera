@@ -71,7 +71,7 @@ puppet_mode = False  # Hold SPACE for continuous corruption
 
 # TUNING CONTROLS (adjustable with keys)
 corrupt_intensity = 1.0  # 0.3 = mild, 1.0 = normal, 2.0 = extreme ({ } to adjust)
-corrupt_speed = 1.0      # 0.5 = slow waves, 1.0 = normal, 2.0 = fast ([ ] to adjust)
+corrupt_speed = 0.0      # 0 = manual only, 0.5 = slow waves, 1.0 = normal, 2.0 = fast ([ ] to adjust)
 face_pop_amount = 0.3    # How often face pops through (0 = never, 1 = always) (; ' to adjust)
 
 # DEPTH INVERT TUNING (mode 5)
@@ -86,6 +86,9 @@ vasari_wave_intensity = 0.7
 breakup_wave_start = -999
 breakup_wave_length = 200
 breakup_wave_intensity = 0.7
+
+# Depth cache (use list so it's mutable from inner scope)
+_cached_depth = [None]
 
 
 def crop_center(img, zoom=1.0):
@@ -147,11 +150,15 @@ def effect_vasari(rgb, depth):
     out = cv2.bitwise_not(rgb)
     h, w = out.shape[:2]
 
-    # Wave timing adjusted by speed
-    wave_min = max(10, int(15 / corrupt_speed))
-    wave_max = max(20, int(40 / corrupt_speed))
-    cooldown_min = max(10, int(20 / corrupt_speed))
-    cooldown_max = max(30, int(60 / corrupt_speed))
+    # Wave timing adjusted by speed (speed 0 = no auto zaps)
+    if corrupt_speed > 0:
+        wave_min = max(10, int(15 / corrupt_speed))
+        wave_max = max(20, int(40 / corrupt_speed))
+        cooldown_min = max(10, int(20 / corrupt_speed))
+        cooldown_max = max(30, int(60 / corrupt_speed))
+    else:
+        wave_min, wave_max = 15, 40
+        cooldown_min, cooldown_max = 9999999, 9999999  # effectively disable auto
 
     # PUPPET MODE: continuous corruption while SPACE held
     if puppet_mode:
@@ -164,7 +171,7 @@ def effect_vasari(rgb, depth):
         vasari_wave_start = frame_count
         vasari_wave_length = random.randint(wave_max, wave_max * 3)
         vasari_wave_intensity = 1.0
-    elif frame_count - vasari_wave_start > vasari_wave_length + random.randint(cooldown_min, cooldown_max) and random.random() > 0.95:
+    elif corrupt_speed > 0 and frame_count - vasari_wave_start > vasari_wave_length + random.randint(cooldown_min, cooldown_max) and random.random() > 0.95:
         vasari_wave_start = frame_count
         vasari_wave_length = random.randint(wave_max, wave_max * 3)
         vasari_wave_intensity = random.uniform(0.7, 1.0)
@@ -175,12 +182,6 @@ def effect_vasari(rgb, depth):
         # Intensity with tuning
         base_intensity = max(0, 1.0 - (wave_progress / max(1, vasari_wave_length))) * vasari_wave_intensity
         intensity = base_intensity * corrupt_intensity
-
-        # === FACE POP: occasionally let real face through ===
-        if face_pop_amount > 0 and random.random() < face_pop_amount * 0.3:
-            # Flash of real face - blend original RGB into corrupted output
-            pop_strength = random.uniform(0.3, 0.8)
-            out = cv2.addWeighted(out, 1 - pop_strength, rgb, pop_strength, 0)
 
         # === HORIZONTAL BAND SHIFTS ===
         num_bands = random.randint(int(8 * corrupt_intensity), int(25 * corrupt_intensity) + 1)
@@ -236,6 +237,12 @@ def effect_vasari(rgb, depth):
                 if num_lines > 0:
                     out[dst_y:dst_y + num_lines, :] = out[src_y:src_y + num_lines, :]
 
+        # === FACE POP: occasionally let real face through ===
+        if face_pop_amount > 0 and random.random() < face_pop_amount * 0.3:
+            # Flash of real face - blend original RGB into corrupted output
+            pop_strength = random.uniform(0.3, 0.8)
+            out = cv2.addWeighted(out, 1 - pop_strength, rgb, pop_strength, 0)
+
         # === FACE POP: bigger chunks of real face ===
         if face_pop_amount > 0.2 and random.random() < face_pop_amount * 0.15 and h > 100 and w > 100:
             # Show a rectangle of real face
@@ -261,11 +268,15 @@ def effect_vasari_breakup(rgb, depth):
     out = rgb.copy()
     h, w = out.shape[:2]
 
-    # Wave timing adjusted by speed
-    wave_min = max(10, int(15 / corrupt_speed))
-    wave_max = max(20, int(40 / corrupt_speed))
-    cooldown_min = max(10, int(20 / corrupt_speed))
-    cooldown_max = max(30, int(60 / corrupt_speed))
+    # Wave timing adjusted by speed (speed 0 = no auto zaps)
+    if corrupt_speed > 0:
+        wave_min = max(10, int(15 / corrupt_speed))
+        wave_max = max(20, int(40 / corrupt_speed))
+        cooldown_min = max(10, int(20 / corrupt_speed))
+        cooldown_max = max(30, int(60 / corrupt_speed))
+    else:
+        wave_min, wave_max = 15, 40
+        cooldown_min, cooldown_max = 9999999, 9999999  # effectively disable auto
 
     # PUPPET MODE: continuous corruption
     if puppet_mode:
@@ -278,7 +289,7 @@ def effect_vasari_breakup(rgb, depth):
         breakup_wave_start = frame_count
         breakup_wave_length = random.randint(wave_max, wave_max * 3)
         breakup_wave_intensity = 1.0
-    elif frame_count - breakup_wave_start > breakup_wave_length + random.randint(cooldown_min, cooldown_max) and random.random() > 0.95:
+    elif corrupt_speed > 0 and frame_count - breakup_wave_start > breakup_wave_length + random.randint(cooldown_min, cooldown_max) and random.random() > 0.95:
         breakup_wave_start = frame_count
         breakup_wave_length = random.randint(wave_max, wave_max * 3)
         breakup_wave_intensity = random.uniform(0.7, 1.0)
@@ -1198,6 +1209,9 @@ def main():
                     depth = crop_center(depth, zoom_level)
                     if depth.shape[:2] != (H, W):
                         depth = cv2.resize(depth, (W, H))
+                    _cached_depth[0] = depth  # cache valid depth
+                elif _cached_depth[0] is not None:
+                    depth = _cached_depth[0]  # use cached depth
 
                 name, fx = effects.get(mode, ("Normal", effect_normal))
                 try:
@@ -1229,7 +1243,8 @@ def main():
                         info += f" | PUPPET"
                     info += f" | I:{corrupt_intensity:.1f} S:{corrupt_speed:.1f} F:{face_pop_amount:.1f}"
                 if mode == ord('5'):
-                    info += f" | T:{depth_threshold:.2f} S:{depth_softness:.1f}"
+                    depth_status = "DEPTH OK" if depth is not None else "NO DEPTH"
+                    info += f" | T:{depth_threshold:.2f} S:{depth_softness:.1f} | {depth_status}"
                 if mode == ord('8'):
                     info += f" | Lag: {int(lag_intensity * 100)}%"
 
@@ -1274,8 +1289,8 @@ def main():
                 # === VASARI TUNING (V/B and combos) ===
                 # [ ] = Speed
                 elif k == ord('[') and mode in vasari_modes:
-                    corrupt_speed = max(0.3, corrupt_speed - 0.2)
-                    print(f"Speed: {corrupt_speed:.1f}")
+                    corrupt_speed = max(0, corrupt_speed - 0.2)
+                    print(f"Speed: {corrupt_speed:.1f}" + (" (auto zaps OFF)" if corrupt_speed == 0 else ""))
                 elif k == ord(']') and mode in vasari_modes:
                     corrupt_speed = min(3.0, corrupt_speed + 0.2)
                     print(f"Speed: {corrupt_speed:.1f}")
