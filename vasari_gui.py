@@ -21,6 +21,7 @@ class S:
     line_weight=2; contour_phase=0.0; invert=False; mirror=False
     _left=None; _right=None  # stereo camera frames
     hue_shift=0  # color shift for stereo effects (0-180)
+    fuzz_frames=0  # frames remaining for universal fuzz effect
 s = S()
 
 # === ALL EFFECTS ===
@@ -440,7 +441,11 @@ class Api:
             if s.mode=='8' and k!='8': s._lag=None
             s.mode,s.name=k,FX[k][0]
         return self.st()
-    def pup(self): s.puppet=not s.puppet; s.v_start=s.b_start=s.fc if s.puppet else s.v_start; return self.st()
+    def pup(self):
+        s.puppet=not s.puppet
+        s.v_start=s.b_start=s.fc if s.puppet else s.v_start
+        s.fuzz_frames = 20  # trigger universal fuzz burst
+        return self.st()
     def si(self,v): s.intensity=max(0.2,min(3.0,float(v))); return self.st()
     def ss(self,v): s.speed=max(0,min(3.0,float(v))); return self.st()
     def sf(self,v): s.facepop=max(0,min(1.0,float(v))); return self.st()
@@ -454,6 +459,14 @@ class Api:
     def tlo(self): s.logo=not s.logo; return self.st()
     def tinv(self): s.invert=not s.invert; return self.st()
     def tmir(self): s.mirror=not s.mirror; return self.st()
+    def reset(self):
+        """Reset to normal - keeps zoom"""
+        z = s.zoom  # preserve zoom
+        s.mode='1'; s.name='Normal'; s.intensity=1.0; s.speed=0.0; s.facepop=0.3
+        s.blend=0.0; s.d_thresh=0.35; s.d_soft=8.0; s.lag_int=0.95
+        s.line_weight=2; s.hue_shift=0; s.invert=False; s.mirror=False
+        s.puppet=False; s.zoom=z
+        return self.st()
     def fr(self):
         if s.frame is not None:
             _,b=cv2.imencode('.jpg',s.frame,[cv2.IMWRITE_JPEG_QUALITY,85])
@@ -527,6 +540,20 @@ def cam(logo):
                 try: o=fx_fn(rgb,d)
                 except: o=rgb.copy()
                 if o is None: o=rgb.copy()
+                # Universal fuzz on spacebar (works in any mode)
+                if s.fuzz_frames > 0:
+                    s.fuzz_frames -= 1
+                    fint = min(1.0, s.fuzz_frames / 15) * s.intensity
+                    h,w = o.shape[:2]
+                    # Band shifts
+                    for _ in range(random.randint(3, 12)):
+                        y = random.randint(0, h-2)
+                        bh = min(random.randint(2, 30), h-y)
+                        if bh > 0:
+                            o[y:y+bh,:] = np.roll(o[y:y+bh,:], random.randint(-int(40*fint), int(40*fint)), axis=1)
+                    # Noise
+                    noise = np.random.randint(-int(30*fint), int(30*fint)+1, o.shape, dtype=np.int16)
+                    o = np.clip(o.astype(np.int16) + noise, 0, 255).astype(np.uint8)
                 if s.mirror: o=cv2.flip(o,1)
                 if s.invert: o=cv2.bitwise_not(o)
                 o=np.ascontiguousarray(o,dtype=np.uint8)
@@ -556,7 +583,7 @@ body{font:11px/1.3 system-ui;background:#0a0a0a;color:#ccc;overflow:hidden}
 .stitle{font-size:8px;color:#567;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
 .param{display:flex;flex-direction:column;gap:1px;margin-bottom:6px}
 .param .row{display:flex;align-items:center;gap:4px}
-.param label{width:55px;font-size:9px;color:#888}
+.param label{width:55px;font-size:9px;color:#aaa;font-weight:600}
 .param .ctrl{display:flex;align-items:center;gap:2px}
 .param input[type=text]{width:45px;background:#1a1a1a;border:1px solid #333;color:#fff;padding:3px 4px;font-size:10px;text-align:center;font-family:monospace}
 .param input[type=text]:focus{outline:none;border-color:#567}
@@ -574,10 +601,10 @@ body{font:11px/1.3 system-ui;background:#0a0a0a;color:#ccc;overflow:hidden}
 .m{background:#1a1a1a;border:1px solid #333;border-radius:3px;padding:4px 8px;cursor:pointer;font-size:9px;font-weight:600;transition:all .1s}
 .m:hover{border-color:#567;color:#fff}
 .m.on{background:#234;border-color:#567;color:#fff}
-.vars{display:flex;flex-wrap:wrap;gap:6px;min-height:16px}
-.vars a{font-size:9px;color:#567;cursor:pointer;text-decoration:none}
-.vars a:hover{color:#8ab;text-decoration:underline}
-.vars a.on{color:#fff;font-weight:600}
+.vars{display:flex;flex-wrap:wrap;gap:3px;min-height:14px}
+.vars a{background:#1a1a1a;border:1px solid #333;border-radius:3px;padding:4px 8px;cursor:pointer;font-size:9px;font-weight:600;color:#888;text-decoration:none;transition:all .1s}
+.vars a:hover{border-color:#567;color:#fff}
+.vars a.on{background:#234;border-color:#567;color:#fff}
 .pbutton{background:#1a1a1a;border:1px solid #333;border-radius:3px;padding:4px 12px;cursor:pointer;font-size:10px;font-weight:600;color:#888;margin-left:auto}
 .pbutton:hover{border-color:#567;color:#fff}
 .pbutton.on{background:#822;border-color:#a44;color:#fff}
@@ -618,7 +645,7 @@ body{font:11px/1.3 system-ui;background:#0a0a0a;color:#ccc;overflow:hidden}
 <label class="chk"><input type="checkbox" id="cmir"><span>Mirror</span><span class="key">M</span></label>
 </div>
 </div>
-<div class="note">Overlays can combine with any mode. COMBOS = VASARI + depth effect.</div>
+<div class="note">ESC=reset. OAK-D required: DEPTH, POINTS, DISPLACE, CONTOUR, PORTAL, STEREO, COMBOS</div>
 </div>
 </div>
 <div class="bot">
@@ -737,6 +764,7 @@ if(!a)return;
 const k=e.key.toLowerCase();
 if(e.target.tagName==='INPUT')return;
 if(e.code==='Space'){e.preventDefault();sync(await a.pup());return}
+if(e.code==='Escape'||e.code==='Backspace'){e.preventDefault();sync(await a.reset());return}
 if(k==='q'){await adj('i',1);return}if(k==='a'){await adj('i',-1);return}
 if(k==='w'){await adj('sp',1);return}if(k==='s'){await adj('sp',-1);return}
 if(k==='e'){await adj('f',1);return}if(k==='d'){await adj('f',-1);return}
