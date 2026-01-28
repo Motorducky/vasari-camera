@@ -18,7 +18,9 @@ class S:
     intensity=1.0; speed=0.0; facepop=0.3; d_thresh=0.35; d_soft=8.0
     v_start=-999; v_len=200; v_int=0.7; b_start=-999; b_len=200; b_int=0.7
     _depth=None; mode='v'; name="VASARI"; run=True; frame=None; logo=True
-    line_weight=1; contour_phase=0.0; invert=False; mirror=False
+    line_weight=2; contour_phase=0.0; invert=False; mirror=False
+    _left=None; _right=None  # stereo camera frames
+    hue_shift=0  # color shift for stereo effects (0-180)
 s = S()
 
 # === ALL EFFECTS ===
@@ -331,6 +333,77 @@ def fx_dpixel(r,d):
                 o[by:by+bh,bx:bx+bw]=np.mean(r[by:by+bh,bx:bx+bw],axis=(0,1))
     return o
 
+# Stereo effects - use left/right cameras
+def get_stereo_frames(r):
+    """Get left/right frames, cropped and resized to match output"""
+    if s._left is None or s._right is None: return None, None
+    h,w=r.shape[:2]
+    left = crop(s._left, s.zoom) if s.zoom > 1 else s._left
+    right = crop(s._right, s.zoom) if s.zoom > 1 else s._right
+    left = cv2.resize(left,(w,h)) if left.shape[:2]!=(h,w) else left
+    right = cv2.resize(right,(w,h)) if right.shape[:2]!=(h,w) else right
+    return left, right
+
+def apply_line_thickness(edges):
+    """Apply line thickness based on s.line_weight"""
+    if s.line_weight > 1:
+        return cv2.dilate(edges, np.ones((s.line_weight, s.line_weight), np.uint8), iterations=1)
+    return edges
+
+def stereo_blend_rgb(effect, r):
+    """Blend stereo effect with normal RGB based on s.blend"""
+    if s.blend > 0:
+        return cv2.addWeighted(effect, 1-s.blend, r, s.blend, 0)
+    return effect
+
+def fx_stereo_edge(r,d):
+    """Green left edge + Blue right edge combined"""
+    left, right = get_stereo_frames(r)
+    if left is None: return r
+    h,w=r.shape[:2]
+    el = apply_line_thickness(cv2.Canny(left,50,150))
+    er = apply_line_thickness(cv2.Canny(right,50,150))
+    o = np.zeros((h,w,3),dtype=np.uint8)
+    if s.hue_shift == 0:  # default green/blue
+        o[:,:,1] = el  # green = left
+        o[:,:,0] = er  # blue = right
+    else:  # apply hue shift via HSV
+        o[:,:,1] = el
+        o[:,:,0] = er
+        hsv = cv2.cvtColor(o, cv2.COLOR_BGR2HSV)
+        hsv[:,:,0] = (hsv[:,:,0].astype(np.int16) + s.hue_shift) % 180
+        o = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    return stereo_blend_rgb(o, r)
+
+def fx_stereo_anaglyph(r,d):
+    """Classic red/cyan anaglyph from stereo pair"""
+    left, right = get_stereo_frames(r)
+    if left is None: return r
+    h,w=r.shape[:2]
+    o = np.zeros((h,w,3),dtype=np.uint8)
+    o[:,:,2] = left   # red = left
+    o[:,:,1] = right  # green = right (cyan-ish)
+    o[:,:,0] = right  # blue = right
+    return stereo_blend_rgb(o, r)
+
+def fx_stereo_diff(r,d):
+    """Difference between left and right - shows depth displacement"""
+    left, right = get_stereo_frames(r)
+    if left is None: return r
+    diff = cv2.absdiff(left, right)
+    o = cv2.applyColorMap(diff, cv2.COLORMAP_VIRIDIS)
+    return stereo_blend_rgb(o, r)
+
+def fx_stereo_blend(r,d):
+    """Blend left green + right blue with RGB overlay"""
+    left, right = get_stereo_frames(r)
+    if left is None: return r
+    h,w=r.shape[:2]
+    o = np.zeros((h,w,3),dtype=np.uint8)
+    o[:,:,1] = left   # green = left
+    o[:,:,0] = right  # blue = right
+    return cv2.addWeighted(o, 1-s.blend, r, s.blend, 0) if s.blend > 0 else o
+
 # Combos
 def combo(base):
     def c(r,d): return base(fx_break(r,d),d) if d else fx_break(r,d)
@@ -346,6 +419,10 @@ FX={
     'a':("Wave",fx_disp_wave),'s':("Shatter",fx_disp_shatter),
     '7':("Contour",fx_cont),'z':("Thick",fx_cont_thick),'x':("Filled",fx_cont_filled),
     '0':("Portal",fx_portal),
+    # Stereo (n=main, variants use shift numbers)
+    'n':("StereoEdge",fx_stereo_edge),',':("Anaglyph",fx_stereo_anaglyph),
+    '.':("StereoDiff",fx_stereo_diff),'/':("StereoBlend",fx_stereo_blend),
+    # Combos
     'd':("V+Ripple",combo(fx_disp_ripple)),'f':("V+Stretch",combo(fx_disp_stretch)),
     'g':("V+Twist",combo(fx_disp_twist)),'h':("V+Pixel",combo(fx_dpixel)),
     'j':("V+Parallax",combo(fx_parallax)),'k':("V+Select",combo(fx_selective)),'l':("V+Shadow",combo(fx_shadow)),
@@ -356,7 +433,7 @@ class Api:
         return {'m':s.name,'k':s.mode,'p':s.puppet,'i':round(s.intensity,2),'sp':round(s.speed,2),
                 'f':round(s.facepop,2),'bl':round(s.blend,2),'z':round(s.zoom,1),
                 'dt':round(s.d_thresh,2),'ds':round(s.d_soft,0),'lg':round(s.lag_int,2),'lo':s.logo,
-                'inv':s.invert,'mir':s.mirror}
+                'inv':s.invert,'mir':s.mirror,'lw':s.line_weight,'hu':s.hue_shift}
     def mode(self,k):
         k=k.lower()
         if k in FX:
@@ -372,6 +449,8 @@ class Api:
     def sdt(self,v): s.d_thresh=max(0.1,min(0.9,float(v))); return self.st()
     def sds(self,v): s.d_soft=max(1.0,min(20.0,float(v))); return self.st()
     def slg(self,v): s.lag_int=max(0.5,min(0.99,float(v))); return self.st()
+    def slw(self,v): s.line_weight=max(1,min(10,int(v))); return self.st()
+    def shu(self,v): s.hue_shift=max(0,min(180,int(v))); return self.st()
     def tlo(self): s.logo=not s.logo; return self.st()
     def tinv(self): s.invert=not s.invert; return self.st()
     def tmir(self): s.mirror=not s.mirror; return self.st()
@@ -418,8 +497,12 @@ def cam(logo):
         c=p.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_A)
         co=c.requestOutput((W,H),dai.ImgFrame.Type.BGR888p)
         qr=co.createOutputQueue(maxSize=2,blocking=False)
-        l=p.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B); lo=l.requestOutput((640,480))
-        r=p.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C); ro=r.requestOutput((640,480))
+        l=p.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_B)
+        lo=l.requestOutput((640,480))
+        ql=lo.createOutputQueue(maxSize=2,blocking=False)  # left cam queue
+        r=p.create(dai.node.Camera).build(dai.CameraBoardSocket.CAM_C)
+        ro=r.requestOutput((640,480))
+        qright=ro.createOutputQueue(maxSize=2,blocking=False)  # right cam queue
         st=p.create(dai.node.StereoDepth); lo.link(st.left); ro.link(st.right)
         qd=st.depth.createOutputQueue(maxSize=2,blocking=False)
         p.start()
@@ -435,6 +518,11 @@ def cam(logo):
                 rgb=crop(rm.getCvFrame(),s.zoom); d=None; dm=qd.tryGet()
                 if dm: d=dm.getFrame(); d=crop(d,s.zoom); d=cv2.resize(d,(W,H)) if d.shape[:2]!=(H,W) else d; s._depth=d
                 elif s._depth is not None: d=s._depth
+                # Get left/right stereo frames
+                lm=ql.tryGet()
+                if lm: s._left=lm.getCvFrame()
+                rm2=qright.tryGet()
+                if rm2: s._right=rm2.getCvFrame()
                 _,fx_fn=FX.get(s.mode,("Normal",fx_norm))
                 try: o=fx_fn(rgb,d)
                 except: o=rgb.copy()
@@ -518,6 +606,11 @@ body{font:11px/1.3 system-ui;background:#0a0a0a;color:#ccc;overflow:hidden}
 <div class="param"><div class="row"><label>Lag</label><div class="ctrl"><span class="arr dn" data-p="lg">-</span><input type="text" id="vlg" value="0.95"><span class="arr up" data-p="lg">+</span></div></div></div>
 </div>
 <div>
+<div class="stitle">Lines/Stereo</div>
+<div class="param"><div class="row"><label>Thickness</label><div class="ctrl"><span class="arr dn" data-p="lw">-</span><input type="text" id="vlw" value="2"><span class="arr up" data-p="lw">+</span></div></div><div class="key">Y / H</div></div>
+<div class="param"><div class="row"><label>Hue</label><div class="ctrl"><span class="arr dn" data-p="hu">-</span><input type="text" id="vhu" value="0"><span class="arr up" data-p="hu">+</span></div></div><div class="key">U / J</div></div>
+</div>
+<div>
 <div class="stitle">Overlays (stack with any mode)</div>
 <div class="checks">
 <label class="chk"><input type="checkbox" id="clo" checked><span>Logo</span><span class="key">L</span></label>
@@ -537,6 +630,7 @@ body{font:11px/1.3 system-ui;background:#0a0a0a;color:#ccc;overflow:hidden}
 <span class="m" data-mode="POINTS">POINTS</span>
 <span class="m" data-mode="DISPLACE">DISPLACE</span>
 <span class="m" data-mode="CONTOUR">CONTOUR</span>
+<span class="m" data-mode="STEREO">STEREO</span>
 <span class="m" data-mode="EDGE">EDGE</span>
 <span class="m" data-mode="THERMAL">THERMAL</span>
 <span class="m" data-mode="PORTAL">PORTAL</span>
@@ -556,6 +650,7 @@ DEPTH:{key:'3',vars:[['4','Atmos'],['5','D-Inv'],['8','Lag'],['c','Grain'],['o',
 POINTS:{key:'9',vars:[['w','Sparse'],['e','Dense'],['r','Rainbow'],['t','Stripes'],['y','Rain'],['u','Scatter']]},
 DISPLACE:{key:'a',vars:[['s','Shatter']]},
 CONTOUR:{key:'7',vars:[['z','Thick'],['x','Filled']]},
+STEREO:{key:'n',vars:[[',','Anaglyph'],['.','Diff'],['/','Blend']]},
 EDGE:{key:'2',vars:[]},
 THERMAL:{key:'6',vars:[]},
 PORTAL:{key:'0',vars:[]},
@@ -569,12 +664,14 @@ bl:{el:'vb',min:0,max:1,step:0.05,fn:'sb'},
 z:{el:'vz',min:1,max:5,step:0.5,fn:'sz'},
 dt:{el:'vdt',min:0.1,max:0.9,step:0.05,fn:'sdt'},
 ds:{el:'vds',min:1,max:20,step:1,fn:'sds'},
-lg:{el:'vlg',min:0.5,max:0.99,step:0.02,fn:'slg'}
+lg:{el:'vlg',min:0.5,max:0.99,step:0.02,fn:'slg'},
+lw:{el:'vlw',min:1,max:10,step:1,fn:'slw'},
+hu:{el:'vhu',min:0,max:180,step:10,fn:'shu'}
 };
 let curMode='VASARI';
 async function tick(){if(!a){requestAnimationFrame(tick);return}try{const f=await a.fr();if(f)document.getElementById('vid').src='data:image/jpeg;base64,'+f}catch(e){}requestAnimationFrame(tick)}
 function getMode(k){for(let m in MODES){if(MODES[m].key===k)return m;for(let v of MODES[m].vars)if(v[0]===k)return m}return null}
-function fmt(v,p){return p==='ds'?v.toFixed(0):p==='z'?v.toFixed(1):v.toFixed(2)}
+function fmt(v,p){return ['ds','lw','hu'].includes(p)?v.toFixed(0):p==='z'?v.toFixed(1):v.toFixed(2)}
 function sync(d){
 document.getElementById('ms').textContent=d.m;
 const cm=getMode(d.k);if(cm){curMode=cm;updateVars()}
@@ -590,6 +687,8 @@ document.getElementById('vz').value=fmt(d.z,'z');
 document.getElementById('vdt').value=fmt(d.dt,'dt');
 document.getElementById('vds').value=fmt(d.ds,'ds');
 document.getElementById('vlg').value=fmt(d.lg,'lg');
+document.getElementById('vlw').value=fmt(d.lw,'lw');
+document.getElementById('vhu').value=fmt(d.hu,'hu');
 document.getElementById('clo').checked=d.lo;
 document.getElementById('cinv').checked=d.inv;
 document.getElementById('cmir').checked=d.mir;
@@ -643,10 +742,12 @@ if(k==='w'){await adj('sp',1);return}if(k==='s'){await adj('sp',-1);return}
 if(k==='e'){await adj('f',1);return}if(k==='d'){await adj('f',-1);return}
 if(k==='r'){await adj('bl',1);return}if(k==='f'){await adj('bl',-1);return}
 if(k==='t'){await adj('z',1);return}if(k==='g'){await adj('z',-1);return}
+if(k==='y'){await adj('lw',1);return}if(k==='h'){await adj('lw',-1);return}
+if(k==='u'){await adj('hu',1);return}if(k==='j'){await adj('hu',-1);return}
 if(k==='l'){sync(await a.tlo());return}
 if(k==='i'){sync(await a.tinv());return}
 if(k==='m'){sync(await a.tmir());return}
-if('1234567890vbco'.includes(k)&&!e.metaKey&&!e.ctrlKey){sync(await a.mode(k))}
+if('1234567890vbcon,./'.includes(k)&&!e.metaKey&&!e.ctrlKey){sync(await a.mode(k))}
 });
 function init(){
 a=window.pywebview.api;
